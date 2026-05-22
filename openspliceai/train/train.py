@@ -49,7 +49,7 @@ def initialize_model_and_optim(device, flanking_size, epochs, scheduler):
     CL = 2 * np.sum(AR*(W-1))
     print("\033[1mContext nucleotides: %d\033[0m" % (CL))
     print("\033[1mSequence length (output): %d\033[0m" % (SL))
-    model = SpliceAI(L, W, AR).to(device)
+    model = SpliceAI(L, W, AR, in_channels=8).to(device)
     print(model, file=sys.stderr)
     # optimizer = optim.Adam(model.parameters(), lr=1e-3)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
