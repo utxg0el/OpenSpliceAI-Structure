@@ -39,15 +39,19 @@ def initialize_model_and_optim(device, flanking_size, pretrained_model):
     CL = 2 * np.sum(AR * (W - 1))
     print("\033[1mContext nucleotides: %d\033[0m" % (CL))
     print("\033[1mSequence length (output): %d\033[0m" % (SL))
+
+    # Load the pretrained model
+    state_dict = torch.load(pretrained_model, map_location=device)
+    in_channels = state_dict['initial_conv.weight'].shape[1]
+
     # Initialize the model
-    model = SpliceAI(L, W, AR, apply_softmax=False).to(device)
+    model = SpliceAI(L, W, AR, apply_softmax=False, in_channels=in_channels).to(device)
     # Print the shapes of the parameters in the initialized model
     print("\nInitialized model parameter shapes:")
     for name, param in model.named_parameters():
         print(f"{name}: {param.shape}", end=", ")
 
-    # Load the pretrained model
-    state_dict = torch.load(pretrained_model, map_location=device)
+
 
     # Filter out unnecessary keys and load matching keys into model
     model_dict = model.state_dict()

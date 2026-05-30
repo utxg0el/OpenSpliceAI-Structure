@@ -31,7 +31,7 @@ def load_pytorch_models(model_path, CL):
     - loaded_models (list): SpliceAI model(s) loaded with given state.
     """
     
-    def load_model(device, flanking_size):
+    def load_model(device, flanking_size, in_channels=4):
         """Loads the given model."""
         # Hyper-parameters:
         # L: Number of convolution kernels
@@ -69,7 +69,7 @@ def load_pytorch_models(model_path, CL):
         print(f"\t[INFO] Context nucleotides {CL}")
         print(f"\t[INFO] Sequence length (output): {SL}")
         
-        model = SpliceAI(L, W, AR).to(device)
+        model = SpliceAI(L, W, AR, in_channels=in_channels).to(device)
         params = {'L': L, 'W': W, 'AR': AR, 'CL': CL, 'SL': SL, 'BATCH_SIZE': BATCH_SIZE, 'N_GPUS': N_GPUS}
 
         return model, params
@@ -118,7 +118,8 @@ def load_pytorch_models(model_path, CL):
     )
 
     for state_dict in models:
-        model, params = load_model(device, CL)  # loads new SpliceAI model with correct hyperparams
+        in_channels = state_dict['initial_conv.weight'].shape[1]
+        model, params = load_model(device, CL, in_channels=in_channels)# loads new SpliceAI model with correct hyperparams
         try:
             model.load_state_dict(state_dict)   # loads state dict
         except RuntimeError as e:
@@ -286,6 +287,15 @@ class Annotator:
         elif model_type == 'pytorch': # load models using pytorch 
             self.models = load_pytorch_models(model_path, CL)
             self.keras = False
+            in_ch = self.models[0].initial_conv.in_channels
+            if in_ch != 4:
+                raise NotImplementedError(
+                    f"variant subcommand currently only supports 4-channel models "
+                    f"(got in_channels={in_ch}). For 8-channel structure models, "
+                    f"use the predict subcommand with --structure-path, or call "
+                    f"your model directly from a custom script (see "
+                    f"rna-structure-pipeline/scripts/local/evals/)."
+                )
         else:
             logging.error('Model type {} not supported'.format(model_type))
             exit()
