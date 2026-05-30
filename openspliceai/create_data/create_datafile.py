@@ -54,6 +54,9 @@ def get_sequences_and_labels(db, output_dir, seq_dict, chrom_dict, train_or_test
         if gene.strand == '-':
             gene_seq = gene_seq.reverse_complement() # reverse complement the sequence
         gene_seq = str(gene_seq.upper())
+        if not all(c in 'ACGT' for c in gene_seq):
+            print(f"\tSkipping {gene_id}: contains non-ACGT characters")
+            continue
         print(f"\tProcessing gene {gene_id} on chromosome {gene.seqid}..., len(gene_seq): {len(gene_seq)}")
         labels = [0] * len(gene_seq)  # Initialize all labels to 0
         if biotype =="protein-coding":

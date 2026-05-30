@@ -120,7 +120,12 @@ def parse_args_predict(subparsers):
     parser_predict.add_argument('--flush-threshold', type=int, default=500, help='Maximum number of predictions before flushing to file')
     parser_predict.add_argument('--split-threshold', type=int, default=1500000, help='Maximum length of FASTA entry before splitting')
     parser_predict.add_argument('--chunk-size', type=int, default=100, help='Chunk size for loading HDF5 dataset')
-
+    parser_predict.add_argument(
+        '--structure-path', type=str, default=None,
+        help="TSV with header containing 'seq_id' and 'dot_bracket' columns "
+             "(merged.tsv from rna-structure-pipeline works directly). "
+             "Required for 8-channel structure models. "
+    )
 
 def parse_args_variant(subparsers):
     parser_variant = subparsers.add_parser('variant', help='Label genetic variations with their predicted effects on splicing.')
@@ -136,6 +141,10 @@ def parse_args_variant(subparsers):
     parser_variant.add_argument('-M', '--mask', metavar='mask', nargs='?', default=0, type=int, choices=[0, 1], 
                                     help='mask scores representing annotated acceptor/donor gain and '
                                         'unannotated acceptor/donor loss, defaults to 0')
+    parser_variant.add_argument(
+        '--structure-path', type=str, default=None,
+        help="(Reserved for 8-channel models.) "
+    )
     '''AM: newly added flags below vv'''
     parser_variant.add_argument('--model', '-m', default="SpliceAI", type=str, help='Path to a SpliceAI model file, or path to a directory of SpliceAI models, or "SpliceAI" for the default model')
     parser_variant.add_argument('--flanking-size', '-f', type=int, default=80, help='Sum of flanking sequence lengths on each side of input (i.e. 40+40)')

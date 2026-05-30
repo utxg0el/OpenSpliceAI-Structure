@@ -9,7 +9,7 @@ import platform
 import h5py
 import time
 from pyfaidx import Fasta
-from openspliceai.train_base.openspliceai import SpliceAI
+from openspliceai.train_base.openspliceai import SpliceAI, infer_in_channels
 import openspliceai.predict.utils as utils
     
 ################
@@ -249,6 +249,30 @@ def get_sequences(fasta_file, output_dir, CL_max, hdf_threshold_len=0, split_fas
 ##   STEP 2   ##
 ################
 
+def load_structures(structure_path):
+    """
+    Load {seq_id: dot_bracket} from a TSV. Header must contain
+    'seq_id' and 'dot_bracket' columns. Compatible with merged.tsv from
+    rna-structure-pipeline (extra columns are ignored).
+    """
+    structures = {}
+    with open(structure_path) as f:
+        header = f.readline().rstrip('\n').split('\t')
+        try:
+            sid_col = header.index('seq_id')
+            db_col = header.index('dot_bracket')
+        except ValueError as e:
+            raise ValueError(
+                f"--structure-path TSV header must contain 'seq_id' and 'dot_bracket'; got {header}"
+            ) from e
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) <= max(sid_col, db_col):
+                continue
+            structures[parts[sid_col]] = parts[db_col]
+    return structures
+
+
 def create_datapoints(input_string, SL, CL_max, debug=False):
     """
     Parameters:
@@ -308,7 +332,7 @@ def create_datapoints(input_string, SL, CL_max, debug=False):
         - numpy.ndarray: the one-hot encoded input sequence data.
         """
 
-        # One-hot encoding of the inputs: 
+        # One-hot encoding of the inputs:
         # 1: A;  2: C;  3: G;  4: T;  0: padding
         IN_MAP = np.asarray([[0, 0, 0, 0],
                             [1, 0, 0, 0],
@@ -341,9 +365,102 @@ def create_datapoints(input_string, SL, CL_max, debug=False):
     X = one_hot_encode(Xd) # one-hot encode
     if debug:
         print('\tX', X.shape, file=sys.stderr)
-    return X 
+    return X
 
-def convert_sequences(datafile_path, output_dir, SL, CL_max, chunk_size=100, SEQ=None, debug=False):
+
+def create_datapoints_8ch(input_string, structure, SL, CL_max, debug=False):
+    """
+    8-channel input encoder for predict (4 nt one-hot + 3 dot-bracket
+    one-hot + 1 wobble indicator). Mirrors create_8ch_datapoints in
+    rna-structure-pipeline/scripts/local/osai_structure/create_dataset_8ch.py
+    but without per-base labels.
+    """
+    assert len(input_string) == len(structure), (
+        f"seq len {len(input_string)} != structure len {len(structure)}"
+    )
+
+    IN_MAP_SEQ = np.asarray(
+        [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        dtype=np.int8,
+    )
+    IN_MAP_STRUCT = np.asarray(
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.int8,
+    )
+    STRUCT_TO_INT = {'.': 1, '(': 2, ')': 3}
+
+    # Wobble (G-U) indicator via parenthesis bijection
+    stack = []
+    bij = list(range(len(structure)))
+    for i, c in enumerate(structure):
+        if c == '(':
+            stack.append(i)
+        elif c == ')':
+            if not stack:
+                raise ValueError(f"Unbalanced ')' at index {i} in dot-bracket")
+            j = stack.pop()
+            bij[i], bij[j] = j, i
+    if stack:
+        raise ValueError(f"Unbalanced '(' at index {stack[-1]} in dot-bracket")
+
+    seq_u = input_string.upper()
+    wobble = np.asarray(
+        [1 if {seq_u[i], seq_u[bij[i]]} == {'G', 'T'} else 0
+         for i in range(len(seq_u))],
+        dtype=np.int8,
+    )
+
+    # Replace non-ACGT with N (matches create_datapoints' allowed_chars handling)
+    allowed = {'A', 'C', 'G', 'T'}
+    seq = ''.join(c if c in allowed else 'N' for c in seq_u)
+
+    pad_half = CL_max // 2
+    seq_padded = 'N' * pad_half + seq + 'N' * pad_half
+    seq_int = np.asarray(
+        list(map(int,
+                 seq_padded.replace('A', '1').replace('C', '2')
+                           .replace('G', '3').replace('T', '4').replace('N', '0'))),
+        dtype=np.int8,
+    )
+    struct_int_core = np.fromiter(
+        (STRUCT_TO_INT[c] for c in structure), dtype=np.int8, count=len(structure),
+    )
+    struct_int = np.concatenate([
+        np.zeros(pad_half, dtype=np.int8),
+        struct_int_core,
+        np.zeros(pad_half, dtype=np.int8),
+    ])
+    wobble_int = np.concatenate([
+        np.zeros(pad_half, dtype=np.int8),
+        wobble,
+        np.zeros(pad_half, dtype=np.int8),
+    ])
+
+    num_points = utils.ceil_div(len(seq), SL)
+    seq_int = np.pad(seq_int, (0, SL), constant_values=0)
+    struct_int = np.pad(struct_int, (0, SL), constant_values=0)
+    wobble_int = np.pad(wobble_int, (0, SL), constant_values=0)
+
+    Xd_seq = np.zeros((num_points, SL + CL_max), dtype=np.int8)
+    Xd_struct = np.zeros((num_points, SL + CL_max), dtype=np.int8)
+    Xd_wobble = np.zeros((num_points, SL + CL_max), dtype=np.int8)
+    for i in range(num_points):
+        a, b = SL * i, SL * (i + 1) + CL_max
+        Xd_seq[i] = seq_int[a:b]
+        Xd_struct[i] = struct_int[a:b]
+        Xd_wobble[i] = wobble_int[a:b]
+
+    X = np.concatenate([
+        IN_MAP_SEQ[Xd_seq],          # (N, SL+CL_max, 4)
+        IN_MAP_STRUCT[Xd_struct],    # (N, SL+CL_max, 3)
+        Xd_wobble[..., None],        # (N, SL+CL_max, 1)
+    ], axis=-1).astype(np.int8)
+
+    if debug:
+        print(f'\t[DEBUG] create_datapoints_8ch: X.shape={X.shape}', file=sys.stderr)
+    return X
+
+
+def convert_sequences(datafile_path, output_dir, SL, CL_max, chunk_size=100, SEQ=None, NAME=None, structures=None, in_channels=4, debug=False):
     '''
     Script to convert datafile into a one-hot encoded dataset ready to input to model. 
     If HDF5 file used, data is chunked for loading. 
@@ -365,7 +482,18 @@ def convert_sequences(datafile_path, output_dir, SL, CL_max, chunk_size=100, SEQ
             idx = i * chunk_size + j
 
             seq_decode = SEQ[idx]
-            X = create_datapoints(seq_decode, SL, CL_max, debug=debug) 
+            if in_channels == 8:
+                seq_id = NAME[idx] if NAME is not None else f"seq_{idx}"
+                if isinstance(seq_id, bytes):
+                    seq_id = seq_id.decode('ascii')
+                if structures is None or seq_id not in structures:
+                    raise KeyError(
+                        f"No structure for '{seq_id}' in --structure-path TSV. "
+                        f"Every FASTA record must have a matching seq_id row."
+                    )
+                X = create_datapoints_8ch(seq_decode, structures[seq_id], SL, CL_max, debug=debug)
+            else:
+                X = create_datapoints(seq_decode, SL, CL_max, debug=debug) 
             if debug:      
                 print('\tX.shape:', X.shape, file=sys.stderr)
             LEN.append(len(X))
@@ -385,18 +513,25 @@ def convert_sequences(datafile_path, output_dir, SL, CL_max, chunk_size=100, SEQ
     use_h5 = file_ext == '.h5'
 
     # read the given input file if both datastreams were not provided
-    if SEQ == None:
+    if SEQ is None:
         print(f"\t[INFO] Reading {datafile_path} ... ")
         if use_h5:
             with h5py.File(datafile_path, 'r') as in_h5f:
                 SEQ = in_h5f['SEQ'][:]
+                if NAME is None and 'NAME' in in_h5f:
+                    NAME = in_h5f['NAME'][:]
         else:
             SEQ = []
+            NAME_local = []
             with open(datafile_path, 'r') as in_file:
                 lines = in_file.readlines()
                 for i, line in enumerate(lines):
-                    if i % 2 == 1: 
+                    if i % 2 == 0:
+                        NAME_local.append(line.strip().lstrip('>'))
+                    else:
                         SEQ.append(line)
+            if NAME is None:
+                NAME = NAME_local
     else:
         print('\t[INFO] NAME and SEQ data provided, skipping reading ...')
 
@@ -473,7 +608,7 @@ def load_pytorch_models(model_path, device, SL, CL):
     - loaded_models (list): SpliceAI model(s) loaded with given state.
     """
     
-    def load_model(device, flanking_size):
+    def load_model(device, flanking_size, in_channels=4):
         """Loads the given model."""
         # Hyper-parameters:
         # L: Number of convolution kernels
@@ -512,7 +647,7 @@ def load_pytorch_models(model_path, device, SL, CL):
         print(f"\t[INFO] Context nucleotides {CL}")
         print(f"\t[INFO] Sequence length (output): {SL}")
         
-        model = SpliceAI(L, W, AR).to(device)
+        model = SpliceAI(L, W, AR, in_channels=in_channels).to(device)
         params = {'L': L, 'W': W, 'AR': AR, 'CL': CL, 'SL': SL, 'BATCH_SIZE': BATCH_SIZE, 'N_GPUS': N_GPUS}
 
         return model, params
@@ -559,7 +694,8 @@ def load_pytorch_models(model_path, device, SL, CL):
     )
 
     for state_dict in models:
-        model, params = load_model(device, CL)  # loads new SpliceAI model with correct hyperparams
+        in_channels = infer_in_channels(state_dict)
+        model, params = load_model(device, CL, in_channels=in_channels) # loads new SpliceAI model with correct hyperparams
         try:
             model.load_state_dict(state_dict)   # loads state dict
         except RuntimeError as e:
@@ -1125,24 +1261,42 @@ def predict_cli(args):
 
     print("--- %s seconds ---" % (time.time() - start_time))
 
-    ### PART 2: Getting one-hot encoding of inputs
-    print("--- Step 2: Creating one-hot encoding ... ---", flush=True)
+    ### PART 2: Load model first so we know in_channels
+    print("--- Step 2: Load model ... ---", flush=True)
     start_time = time.time()
-
-    dataset_path, LEN = convert_sequences(datafile_path, output_base, consts['SL'], consts['CL_max'], chunk_size=consts['CHUNK_SIZE'], SEQ=SEQ, debug=debug)
-
+    device = setup_device()
+    model, params = load_pytorch_models(model_path, device, consts['SL'], flanking_size)
+    in_channels = model[0].in_channels
+    print(f"\t[INFO] Device: {device}, Model in_channels: {in_channels}, Params: {params}")
     print("--- %s seconds ---" % (time.time() - start_time))
 
-    ### PART 3: Loading model
-    print("--- Step 3: Load model ... ---", flush=True)
+    ### PART 2.5: Load structures if model is 8-channel
+    structures = None
+    structure_path = getattr(args, 'structure_path', None)
+    if in_channels == 8:
+        if not structure_path:
+            raise SystemExit(
+                "\t[ERR] Model has 8 input channels (structure-aware) but "
+                "--structure-path was not provided. Pre-fold your sequences "
+                "(e.g. with rna-structure-pipeline/) and pass a TSV with "
+                "'seq_id' and 'dot_bracket' columns. Fold-on-the-fly will be "
+                "added in a future release."
+            )
+        print(f"\t[INFO] Loading structures from {structure_path}")
+        structures = load_structures(structure_path)
+        print(f"\t[INFO] Loaded {len(structures)} structures")
+    elif structure_path:
+        print("\t[WARN] --structure-path provided but model is 4-channel; ignoring structure.")
+
+    ### PART 3: Build encoded inputs
+    print("--- Step 3: Creating one-hot encoding ... ---", flush=True)
     start_time = time.time()
 
-    # setup device
-    device = setup_device()
-
-    # load model from current state
-    model, params = load_pytorch_models(model_path, device, consts['SL'], flanking_size)
-    print(f"\t[INFO] Device: {device}, Model: {model}, Params: {params}")
+    dataset_path, LEN = convert_sequences(
+        datafile_path, output_base, consts['SL'], consts['CL_max'],
+        chunk_size=consts['CHUNK_SIZE'], SEQ=SEQ, NAME=NAME,
+        structures=structures, in_channels=in_channels, debug=debug,
+    )
 
     print("--- %s seconds ---" % (time.time() - start_time))
 
