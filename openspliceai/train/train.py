@@ -16,7 +16,7 @@ from openspliceai.train_base.utils import *
 from openspliceai.constants import *
 import openspliceai.create_data.paralogs as paralogs
 
-def initialize_model_and_optim(device, flanking_size, epochs, scheduler):
+def initialize_model_and_optim(device, flanking_size, epochs, scheduler, in_channels=4):
     # Hyper-parameters:
     # L: Number of convolution kernels
     # W: Convolution window size in each residual unit
@@ -49,7 +49,7 @@ def initialize_model_and_optim(device, flanking_size, epochs, scheduler):
     CL = 2 * np.sum(AR*(W-1))
     print("\033[1mContext nucleotides: %d\033[0m" % (CL))
     print("\033[1mSequence length (output): %d\033[0m" % (SL))
-    model = SpliceAI(L, W, AR).to(device)
+    model = SpliceAI(L, W, AR, in_channels=in_channels).to(device)
     print(model, file=sys.stderr)
     # optimizer = optim.Adam(model.parameters(), lr=1e-3)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -70,7 +70,10 @@ def train(args):
     train_h5f, valid_h5f, test_h5f, batch_num = load_datasets(args)
     train_idxs, val_idxs, test_idxs = generate_indices(train_h5f, valid_h5f, test_h5f)
 
-    model, optimizer, scheduler, params = initialize_model_and_optim(device, args.flanking_size, args.epochs, args.scheduler)
+    # Detect input channels from the dataset (4 = sequence-only, 12 = sequence + 8 RNAplfold accessibility tracks).
+    in_channels = train_h5f['X0'].shape[-1]
+    print(f"\033[1mDetected input channels: {in_channels}\033[0m")
+    model, optimizer, scheduler, params = initialize_model_and_optim(device, args.flanking_size, args.epochs, args.scheduler, in_channels=in_channels)
     params["RANDOM_SEED"] = args.random_seed
     train_metric_files = create_metric_files(log_output_train_base)
     valid_metric_files = create_metric_files(log_output_val_base)
