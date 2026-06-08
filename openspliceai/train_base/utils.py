@@ -269,7 +269,8 @@ def create_metric_files(log_output_base):
     metric_types = ['donor_topk_all', 'donor_topk', 'donor_auprc', 'donor_accuracy', 'donor_precision', 
                     'donor_recall', 'donor_f1', 'acceptor_topk_all', 'acceptor_topk', 'acceptor_auprc', 
                     'acceptor_accuracy', 'acceptor_precision', 'acceptor_recall', 'acceptor_f1', 
-                    'accuracy', 'loss_batch', 'loss_every_update', 'learning_rate_every_epoch', 'learning_rate_every_batch']
+                    'accuracy', 'loss_batch', 'loss_every_update', 'learning_rate_every_epoch', 'learning_rate_every_batch',
+                    'psi_pearson_r', 'psi_mse']
     return {metric: f'{log_output_base}/{metric}.txt' for metric in metric_types}
 
 
@@ -347,43 +348,38 @@ def metrics(batch_ypred, batch_ylabel, metric_files, run_mode):
 
 
 def model_evaluation(batch_ylabel, batch_ypred, metric_files, run_mode, criterion):
-    batch_ylabel = torch.cat(batch_ylabel, dim=0)
-    batch_ypred = torch.cat(batch_ypred, dim=0)
-    is_expr = (batch_ylabel.sum(axis=(1,2)) >= 1).cpu().numpy()
-    if np.any(is_expr):
-        subset_size = 1000
-        indices = np.arange(batch_ylabel[is_expr].shape[0])
-        subset_indices = np.random.choice(indices, size=min(subset_size, len(indices)), replace=False)
-        batch_ylabel = batch_ylabel[is_expr][subset_indices, :, :]
-        batch_ypred = batch_ypred[is_expr][subset_indices, :, :]
-        Y_true_1 = batch_ylabel[:, 1, :].flatten().cpu().detach().numpy()
-        Y_true_2 = batch_ylabel[:, 2, :].flatten().cpu().detach().numpy()
-        Y_pred_1 = batch_ypred[:, 1, :].flatten().cpu().detach().numpy()
-        Y_pred_2 = batch_ypred[:, 2, :].flatten().cpu().detach().numpy()
-        acceptor_topk_accuracy, acceptor_auprc = print_topl_statistics(np.asarray(Y_true_1),
-                            np.asarray(Y_pred_1), metric_files["acceptor_topk_all"], ss_type='acceptor', print_top_k=True)
-        donor_topk_accuracy, donor_auprc = print_topl_statistics(np.asarray(Y_true_2),
-                            np.asarray(Y_pred_2), metric_files["donor_topk_all"], ss_type='donor', print_top_k=True)
-        if criterion == "cross_entropy_loss":
-            loss = categorical_crossentropy_2d(batch_ylabel, batch_ypred)
-        elif criterion == "focal_loss":
-            loss = focal_loss(batch_ylabel, batch_ypred)
-        for k, v in metric_files.items():
-            with open(v, 'a') as f:
-                if k == "loss_batch":
-                    f.write(f"{loss.item()}\n")
-                elif k == "donor_topk":
-                    f.write(f"{donor_topk_accuracy}\n")
-                elif k == "donor_auprc":
-                    f.write(f"{donor_auprc}\n")
-                elif k == "acceptor_topk":
-                    f.write(f"{acceptor_topk_accuracy}\n")
-                elif k == "acceptor_auprc":
-                    f.write(f"{acceptor_auprc}\n")
-        print("***************************************\n")
-        metrics(batch_ypred, batch_ylabel, metric_files, run_mode)
-    batch_ylabel = []
-    batch_ypred = []
+    batch_ylabel = torch.cat(batch_ylabel, dim=0)   # (N, 3, L)
+    batch_ypred = torch.cat(batch_ypred, dim=0)     # (N, 3, L)
+    # Loss: the soft cross-entropy already supports the float PSI targets, so this is unchanged.
+    if criterion == "cross_entropy_loss":
+        loss = categorical_crossentropy_2d(batch_ylabel, batch_ypred)
+    elif criterion == "focal_loss":
+        loss = focal_loss(batch_ylabel, batch_ypred)
+    # --- PSI metric (per-sequence regression via soft labels) ---
+    # Both splice sites sit at the SAME column in every construct, so locate them once from the
+    # column carrying the most acceptor/donor probability mass (robust to PSI=0 constructs, whose
+    # soft label is all-"none"), then read predicted vs. target PSI there for every construct.
+    yt = batch_ylabel.cpu().numpy()
+    yp = batch_ypred.cpu().numpy()
+    acc_pos = int(yt[:, 1, :].sum(axis=0).argmax())   # acceptor column
+    don_pos = int(yt[:, 2, :].sum(axis=0).argmax())   # donor column
+    true_psi = yt[:, 1, acc_pos]                       # soft-label value == measured PSI
+    pred_psi = 0.5 * (yp[:, 1, acc_pos] + yp[:, 2, don_pos])
+    if len(true_psi) > 1 and np.std(pred_psi) > 0 and np.std(true_psi) > 0:
+        psi_r = float(np.corrcoef(pred_psi, true_psi)[0, 1])
+    else:
+        psi_r = float("nan")
+    psi_mse = float(np.mean((pred_psi - true_psi) ** 2))
+    print(f"[{run_mode}] PSI Pearson R = {psi_r:.4f}  MSE = {psi_mse:.4f}  "
+          f"(n={len(true_psi)}, sites @ {acc_pos}/{don_pos})  loss = {loss.item():.4f}")
+    for k, v in metric_files.items():
+        with open(v, 'a') as f:
+            if k == "loss_batch":
+                f.write(f"{loss.item()}\n")
+            elif k == "psi_pearson_r":
+                f.write(f"{psi_r}\n")
+            elif k == "psi_mse":
+                f.write(f"{psi_mse}\n")
     return loss
 
 
