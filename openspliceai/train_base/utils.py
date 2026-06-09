@@ -553,9 +553,13 @@ def categorical_crossentropy_2d(y_true, y_pred):
     """
     Compute 2D categorical cross-entropy loss.
     """
-    return - torch.mean(y_true[:, 0, :]*torch.log(y_pred[:, 0, :]+1e-10)
-                        + y_true[:, 1, :]*torch.log(y_pred[:, 1, :]+1e-10)
-                        + y_true[:, 2, :]*torch.log(y_pred[:, 2, :]+1e-10))
+    acc = int(y_true[:, 1, :].sum(0).argmax())
+    don = int(y_true[:, 2, :].sum(0).argmax())
+    yt = y_true[:, :, [acc, don]]
+    yp = y_pred[:, :, [acc, don]]
+    return - torch.mean(yt[:, 0, :]*torch.log(yp[:, 0, :]+1e-10)
+                        + yt[:, 1, :]*torch.log(yp[:, 1, :]+1e-10)
+                        + yt[:, 2, :]*torch.log(yp[:, 2, :]+1e-10))
 
 
 def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
