@@ -85,7 +85,7 @@ class SpliceAI(nn.Module):
         seq_channels = 4 if self.use_structure else in_channels
         self.initial_conv = nn.Conv1d(seq_channels, L, 1)
         if self.use_structure:
-            self.structure_encoder = StructureEncoder(in_channels - seq_channels, L)
+            self.structure_encoder = StructureEncoder(in_channels, L)
             self.ablate_structure = False  # runtime toggle for zero-out ablation
         self.initial_skip = Skip(L)
         self.residual_units = nn.ModuleList()
@@ -99,10 +99,10 @@ class SpliceAI(nn.Module):
 
     def forward(self, x):
         if self.use_structure:
-            x_struct = x[:, 4:, :]
+            x_full = x
             x = self.initial_conv(x[:, :4, :])
             if not self.ablate_structure:
-                x = x + self.structure_encoder(x_struct)
+                x = x + self.structure_encoder(x_full)
         else:
             x = self.initial_conv(x)
         x, skip = self.initial_skip(x, 0)
