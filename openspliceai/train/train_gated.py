@@ -35,6 +35,12 @@ def make_model(a, device):
         if a.init_4ch:
             sd = torch.load(a.init_4ch, map_location="cpu"); sd = sd.get("model_state_dict", sd)
             print("warm-start backbone from 4ch:", m.load_backbone(sd, strict=False))
+        if getattr(a, "gate_open_init", False):
+            torch.nn.init.constant_(m.struct_head.gate.bias, 3.0); print("gate init OPEN (bias=3.0)")
+        if getattr(a, "freeze_backbone", False):
+            for prm in m.backbone.parameters(): prm.requires_grad = False
+            if not a.init_4ch: print("WARN: --freeze-backbone without --init-4ch freezes a RANDOM backbone")
+            print("backbone FROZEN — training structure head + gate only")
     else:
         m = SpliceAI(L, W, AR, apply_softmax=True)         # stock 4ch matched baseline
     CL = int(2*np.sum(AR*(W-1)))
@@ -45,6 +51,7 @@ def lossfn(name):
 
 def run_epoch(model, h5f, idxs, a, CL, device, crit, opt=None, wh5=None):
     train = opt is not None; model.train(train); tot=0.0; n=0; gate_acc=0.0; gb=0
+    if a.gated and getattr(a, "freeze_backbone", False): model.backbone.eval()
     for si in idxs:
         dl = load_data_from_shard(h5f, si, device, a.batch_size, {}, shuffle=train)
         Wt = torch.tensor(wh5[f"W{si}"][:], dtype=torch.float32) if wh5 is not None else None
@@ -103,6 +110,8 @@ def main():
     p.add_argument("--in-channels", type=int, default=12); p.add_argument("--n-seq-channels", type=int, default=4)
     p.add_argument("--struct-l2", type=float, default=0.0)
     p.add_argument("--init-4ch", default=None)
+    p.add_argument("--freeze-backbone", action="store_true", help="freeze seq backbone; train only structure head+gate (fair test; use with --init-4ch)")
+    p.add_argument("--gate-open-init", action="store_true", help="init gate OPEN (bias=3, g~0.95) so corr develops under full gradient; corr still zero-init => no-op at step 0")
     p.add_argument("--posweights", default=None, help="sidecar h5 of W{shard} (n,SL) per-position weights")
     p.add_argument("--batch-size", type=int, default=36)
     p.add_argument("--out-dir", required=True)
@@ -111,7 +120,7 @@ def main():
     os.makedirs(a.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model, CL = make_model(a, device)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3)
     sch = (torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=5, T_mult=1, eta_min=1e-5)
            if a.scheduler == "CosineAnnealingWarmRestarts"
            else torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[a.epochs-i for i in range(1,6)], gamma=0.5))
