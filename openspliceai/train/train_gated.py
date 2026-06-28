@@ -65,12 +65,13 @@ def run_epoch(model, h5f, idxs, a, CL, device, crit, opt=None, wh5=None):
                 opt.zero_grad(); loss.backward(); opt.step()
             tot += float(loss.detach())*X.shape[0]; n += X.shape[0]
             if getattr(model, "last_gate", None) is not None:
-                gate_acc += float(model.last_gate.mean()); gb += 1
+                gate_acc += float(model.last_gate.mean().detach()); gb += 1
     return tot/max(n,1), (gate_acc/gb if gb else float("nan"))
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--train-dataset", required=True); p.add_argument("--val-dataset", required=True)
+    p.add_argument("--train-dataset", required=True)
+    p.add_argument("--val-dataset", default=None, help="validation h5; if omitted, hold out last ~10%% of train shards")
     p.add_argument("--flanking-size", type=int, default=10000)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--scheduler", default="CosineAnnealingWarmRestarts")
@@ -93,9 +94,15 @@ def main():
            if a.scheduler == "CosineAnnealingWarmRestarts"
            else torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[a.epochs-i for i in range(1,6)], gamma=0.5))
     crit = lossfn(a.loss)
-    tr = h5py.File(a.train_dataset, "r"); va = h5py.File(a.val_dataset, "r")
+    tr = h5py.File(a.train_dataset, "r")
+    all_tr = sorted(int(k[1:]) for k in tr if k.startswith("X"))
+    if a.val_dataset and a.val_dataset.lower() != "none":
+        va = h5py.File(a.val_dataset, "r"); va_sep = True
+        tr_idx = all_tr; va_idx = sorted(int(k[1:]) for k in va if k.startswith("X"))
+    else:                                  # no separate val file -> hold out the last ~10% of train shards
+        k = max(1, len(all_tr) // 10); tr_idx, va_idx = all_tr[:-k], all_tr[-k:]; va = tr; va_sep = False
+        print(f"no --val-dataset -> validation = last {len(va_idx)}/{len(all_tr)} train shards", flush=True)
     wh5 = h5py.File(a.posweights, "r") if a.posweights else None
-    tr_idx = [int(k[1:]) for k in tr if k.startswith("X")]; va_idx = [int(k[1:]) for k in va if k.startswith("X")]
     print(f"device={device} gated={a.gated} CL={CL} train_shards={len(tr_idx)} val_shards={len(va_idx)}")
     best = np.inf
     for ep in range(a.epochs):
@@ -109,7 +116,7 @@ def main():
             best = val; torch.save({"model_state_dict": model.state_dict(), "epoch": ep, "val_loss": val,
                                      "gated": a.gated, "args": vars(a)}, os.path.join(a.out_dir, "model_best.pt"))
         print(f"ep{ep:02d} train_loss={trl:.4f} val_loss={val:.4f} gate={trg:.3f} {time.time()-t0:.0f}s{tag}", flush=True)
-    tr.close(); va.close();  wh5 and wh5.close()
+    tr.close();  va_sep and va.close();  wh5 and wh5.close()
     print("done. best val_loss=%.4f -> %s/model_best.pt" % (best, a.out_dir))
 
 if __name__ == "__main__":
