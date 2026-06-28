@@ -68,10 +68,32 @@ def run_epoch(model, h5f, idxs, a, CL, device, crit, opt=None, wh5=None):
                 gate_acc += float(model.last_gate.mean().detach()); gb += 1
     return tot/max(n,1), (gate_acc/gb if gb else float("nan"))
 
+def test_eval(model, h5f, idxs, a, CL, device, crit):
+    """Test loss + accuracy. overall acc is null-dominated (~1.0); the useful numbers are per-class
+    precision/recall (acceptor=1, donor=2)."""
+    model.eval(); tot = 0.0; n = 0; correct = 0; total = 0
+    tp = {1: 0, 2: 0}; fp = {1: 0, 2: 0}; fn = {1: 0, 2: 0}
+    for si in idxs:
+        for X, Y in load_data_from_shard(h5f, si, device, a.batch_size, {}, shuffle=False):
+            X = X if a.gated else X[:, :a.n_seq_channels, :]
+            X, Y = clip_datapoints(X.to(device), Y.to(device), CL, CL_max, 1)
+            with torch.no_grad():
+                yp = model(X)
+            tot += float(crit(Y, yp).detach()) * X.shape[0]; n += X.shape[0]
+            pred = yp.argmax(1); true = Y.argmax(1)
+            correct += int((pred == true).sum()); total += true.numel()
+            for c in (1, 2):
+                tp[c] += int(((pred == c) & (true == c)).sum())
+                fp[c] += int(((pred == c) & (true != c)).sum())
+                fn[c] += int(((pred != c) & (true == c)).sum())
+    pr = lambda c: tp[c] / max(tp[c] + fp[c], 1); rc = lambda c: tp[c] / max(tp[c] + fn[c], 1)
+    return tot / max(n, 1), correct / max(total, 1), (pr(1), rc(1)), (pr(2), rc(2))
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--train-dataset", required=True)
     p.add_argument("--val-dataset", default=None, help="validation h5; if omitted, hold out last ~10%% of train shards")
+    p.add_argument("--test-dataset", default=None, help="optional: print test loss + accuracy each epoch (monitor only; selection stays on val)")
     p.add_argument("--flanking-size", type=int, default=10000)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--scheduler", default="CosineAnnealingWarmRestarts")
@@ -103,6 +125,8 @@ def main():
         k = max(1, len(all_tr) // 10); tr_idx, va_idx = all_tr[:-k], all_tr[-k:]; va = tr; va_sep = False
         print(f"no --val-dataset -> validation = last {len(va_idx)}/{len(all_tr)} train shards", flush=True)
     wh5 = h5py.File(a.posweights, "r") if a.posweights else None
+    te = h5py.File(a.test_dataset, "r") if a.test_dataset else None
+    te_idx = sorted(int(k[1:]) for k in te if k.startswith("X")) if te else []
     print(f"device={device} gated={a.gated} CL={CL} train_shards={len(tr_idx)} val_shards={len(va_idx)}")
     best = np.inf
     for ep in range(a.epochs):
@@ -115,8 +139,12 @@ def main():
         if val < best:
             best = val; torch.save({"model_state_dict": model.state_dict(), "epoch": ep, "val_loss": val,
                                      "gated": a.gated, "args": vars(a)}, os.path.join(a.out_dir, "model_best.pt"))
-        print(f"ep{ep:02d} train_loss={trl:.4f} val_loss={val:.4f} gate={trg:.3f} {time.time()-t0:.0f}s{tag}", flush=True)
-    tr.close();  va_sep and va.close();  wh5 and wh5.close()
+        msg = f"ep{ep:02d} train_loss={trl:.4f} val_loss={val:.4f} gate={trg:.3f}"
+        if te is not None:
+            tl, tacc, (pa, ra), (pd, rd) = test_eval(model, te, te_idx, a, CL, device, crit)
+            msg += f" | test_loss={tl:.4f} test_acc={tacc:.4f} acc[P{pa:.3f}/R{ra:.3f}] don[P{pd:.3f}/R{rd:.3f}]"
+        print(f"{msg} {time.time()-t0:.0f}s{tag}", flush=True)
+    tr.close();  va_sep and va.close();  wh5 and wh5.close();  te and te.close()
     print("done. best val_loss=%.4f -> %s/model_best.pt" % (best, a.out_dir))
 
 if __name__ == "__main__":
