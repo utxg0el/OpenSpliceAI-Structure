@@ -553,25 +553,33 @@ def weighted_binary_cross_entropy(output, target, weights=None):
     return torch.neg(torch.mean(loss))
 
 
-def categorical_crossentropy_2d(y_true, y_pred):
+def categorical_crossentropy_2d(y_true, y_pred, weights=None):
     """
     Compute 2D categorical cross-entropy loss.
+    Optional per-position `weights` (B, SL) upweight specific positions (e.g. true-sites-in-structured
+    regions for the gated model); when None this is identical to the original mean-reduced loss.
     """
-    return - torch.mean(y_true[:, 0, :]*torch.log(y_pred[:, 0, :]+1e-10)
-                        + y_true[:, 1, :]*torch.log(y_pred[:, 1, :]+1e-10)
-                        + y_true[:, 2, :]*torch.log(y_pred[:, 2, :]+1e-10))
+    ll = (y_true[:, 0, :]*torch.log(y_pred[:, 0, :]+1e-10)
+          + y_true[:, 1, :]*torch.log(y_pred[:, 1, :]+1e-10)
+          + y_true[:, 2, :]*torch.log(y_pred[:, 2, :]+1e-10))
+    if weights is None:
+        return - torch.mean(ll)
+    return - torch.sum(weights * ll) / (torch.sum(weights) + 1e-10)
 
 
-def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
+def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0, weights=None):
     """
-    Compute 2D focal loss.
+    Compute 2D focal loss. Optional per-position `weights` (B, SL); identical to the original when None.
     """
     # Ensuring numerical stability
     gamma = 2
     epsilon = 1e-10
-    return - torch.mean(y_true[:, 0, :]*torch.log(y_pred[:, 0, :]+epsilon) * torch.pow(torch.sub(1, y_pred[:, 0, :]), gamma)
-                        + y_true[:, 1, :]*torch.log(y_pred[:, 1, :]+epsilon) * torch.pow(torch.sub(1, y_pred[:, 1, :]), gamma)
-                        + y_true[:, 2, :]*torch.log(y_pred[:, 2, :]+epsilon) * torch.pow(torch.sub(1, y_pred[:, 2, :]), gamma))
+    fl = (y_true[:, 0, :]*torch.log(y_pred[:, 0, :]+epsilon) * torch.pow(torch.sub(1, y_pred[:, 0, :]), gamma)
+          + y_true[:, 1, :]*torch.log(y_pred[:, 1, :]+epsilon) * torch.pow(torch.sub(1, y_pred[:, 1, :]), gamma)
+          + y_true[:, 2, :]*torch.log(y_pred[:, 2, :]+epsilon) * torch.pow(torch.sub(1, y_pred[:, 2, :]), gamma))
+    if weights is None:
+        return - torch.mean(fl)
+    return - torch.sum(weights * fl) / (torch.sum(weights) + 1e-10)
 
 
 def train_model(model, optimizer, scheduler, train_h5f, valid_h5f, test_h5f, train_idxs, val_idxs, test_idxs,
