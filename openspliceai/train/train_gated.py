@@ -33,8 +33,12 @@ def make_model(a, device):
     if a.gated:
         m = GatedSpliceAI(L, W, AR, apply_softmax=True, in_channels=a.in_channels, n_seq_channels=a.n_seq_channels)
         if a.init_4ch:
-            sd = torch.load(a.init_4ch, map_location="cpu"); sd = sd.get("model_state_dict", sd)
-            print("warm-start backbone from 4ch:", m.load_backbone(sd, strict=False))
+            ck = torch.load(a.init_4ch, map_location="cpu")
+            sd = ck.state_dict() if hasattr(ck, "state_dict") else ck.get("model_state_dict", ck)
+            sd = {(k[7:] if k.startswith("module.") else k): v for k, v in sd.items()}  # strip DataParallel prefix
+            res = m.load_backbone(sd, strict=False)
+            print(f"warm-start backbone from 4ch: missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
+            assert len(res.missing_keys) == 0, f"backbone warm-start FAILED (random backbone!) missing e.g. {res.missing_keys[:4]}"
         if getattr(a, "gate_open_init", False):
             torch.nn.init.constant_(m.struct_head.gate.bias, 3.0); print("gate init OPEN (bias=3.0)")
         if getattr(a, "freeze_backbone", False):
